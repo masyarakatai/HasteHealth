@@ -141,6 +141,17 @@ impl Parameter {
         key
     }
 
+    /// The values as written after `=` in a URL: joined by commas, with a
+    /// comma inside a value escaped so that it parses back as one value.
+    #[must_use]
+    pub fn value_string(&self) -> String {
+        self.value
+            .iter()
+            .map(|value| value.replace(',', "\\,"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     fn parse(key: &str, value: &str) -> Result<Self, ParseError> {
         let mut segments = key.split('.').map(ChainLink::parse);
         // `split` always yields at least one segment.
@@ -518,6 +529,22 @@ mod tests {
         // `\|` and `\\` are left for the value's own parsing.
         assert_eq!(value(r"p=http://a\|b|1,x"), [r"http://a\|b|1", "x"]);
         assert_eq!(value(r"p=a\\,b"), [r"a\\", "b"]);
+    }
+
+    #[test]
+    fn test_value_string_round_trips() {
+        for query in [
+            r"p=Smith\,Jones",
+            "p=Smith,Jones",
+            r"p=a\|b|1,x\,y",
+            r"p=a\\,b",
+        ] {
+            let params = ParsedParameters::try_from(query).unwrap();
+            let ParsedParameter::Resource(p) = params.get("p").unwrap() else {
+                panic!("expected a resource parameter")
+            };
+            assert_eq!(format!("p={}", p.value_string()), query);
+        }
     }
 
     #[test]
