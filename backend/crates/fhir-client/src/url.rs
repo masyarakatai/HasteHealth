@@ -1,7 +1,7 @@
 use derivative::Derivative;
 use haste_fhir_operation_error::derive::OperationOutcomeError;
 use haste_reflect::{MetaValue, derive::Reflect};
-use std::{collections::HashMap, fmt::Display};
+use std::{borrow::Cow, collections::HashMap, fmt::Display};
 
 static RESULT_PARAMETERS: &[&str] = &[
     "_count",
@@ -62,6 +62,58 @@ pub struct Parameter {
     pub chains: Vec<ChainLink>,
 }
 
+/// Splits on each `separator` not escaped by a backslash, leaving the
+/// pieces' escapes in place.
+pub fn split_unescaped(value: &str, separator: char) -> impl Iterator<Item = &str> {
+    let mut rest = Some(value);
+    std::iter::from_fn(move || {
+        let current = rest?;
+        let mut escaped = false;
+        for (i, c) in current.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == separator {
+                rest = Some(&current[i + c.len_utf8()..]);
+                return Some(&current[..i]);
+            }
+        }
+        rest = None;
+        Some(current)
+    })
+}
+
+/// Removes the backslash from each escaped character in `specials`. Any
+/// other escape stays, so a later pass still reads it.
+fn unescape_only<'a>(value: &'a str, specials: &[char]) -> Cow<'a, str> {
+    if !value.contains('\\') {
+        return Cow::Borrowed(value);
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+        } else if let Some(next) = chars.next() {
+            if !specials.contains(&next) {
+                out.push('\\');
+            }
+            out.push(next);
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
+}
+
+/// Resolves every escape (`\,` `\|` `\$` `\\`) to its literal character
+/// (<https://hl7.org/fhir/R4/search.html#escaping>).
+#[must_use]
+pub fn unescape(value: &str) -> Cow<'_, str> {
+    unescape_only(value, &[',', '|', '$', '\\'])
+}
+
 impl Parameter {
     /// Whether this parameter follows a reference (`subject.name`).
     #[must_use]
@@ -99,7 +151,11 @@ impl Parameter {
         Ok(Parameter {
             name: first.name,
             modifier: first.modifier,
-            value: value.split(',').map(str::to_string).collect(),
+            // Only `\,` is resolved here: the escapes that remain belong to
+            // the type's own parsing, which `|` and `$` depend on.
+            value: split_unescaped(value, ',')
+                .map(|piece| unescape_only(piece, &[',']).into_owned())
+                .collect(),
             chains: segments.collect::<Result<_, _>>()?,
         })
     }
@@ -427,6 +483,41 @@ mod tests {
             let result = parse_prefix(input);
             assert_eq!(result, expected, "Failed for input: {input}");
         }
+    }
+
+    #[test]
+    fn test_split_unescaped() {
+        let split = |v| split_unescaped(v, ',').collect::<Vec<_>>();
+        assert_eq!(split("a,b"), ["a", "b"]);
+        assert_eq!(split(r"a\,b"), [r"a\,b"]);
+        assert_eq!(split(r"a\\,b"), [r"a\\", "b"]);
+        assert_eq!(split(""), [""]);
+        assert_eq!(split("é,ü"), ["é", "ü"]);
+    }
+
+    #[test]
+    fn test_unescape() {
+        assert_eq!(unescape(r"a\,b\|c\$d\\e"), r"a,b|c$d\e");
+        assert_eq!(unescape(r"\x"), r"\x");
+        assert_eq!(unescape("plain"), "plain");
+        assert_eq!(unescape("trailing\\"), "trailing\\");
+        assert!(matches!(unescape("plain"), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_parse_escaped_values() {
+        let value = |q| {
+            let params = ParsedParameters::try_from(q).unwrap();
+            let ParsedParameter::Resource(p) = params.get("p").unwrap() else {
+                panic!("expected a resource parameter")
+            };
+            p.value.clone()
+        };
+        assert_eq!(value(r"p=Smith\,Jones"), ["Smith,Jones"]);
+        assert_eq!(value("p=Smith,Jones"), ["Smith", "Jones"]);
+        // `\|` and `\\` are left for the value's own parsing.
+        assert_eq!(value(r"p=http://a\|b|1,x"), [r"http://a\|b|1", "x"]);
+        assert_eq!(value(r"p=a\\,b"), [r"a\\", "b"]);
     }
 
     #[test]

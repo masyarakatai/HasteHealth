@@ -3,6 +3,7 @@ import { expect, test } from "@jest/globals";
 import parseFHIRSearch, {
   escapeParameter,
   splitParameter,
+  splitUnescaped,
   unescapeParameter,
 } from "./url.js";
 
@@ -48,5 +49,27 @@ test("TEST Parameter Split", () => {
     "123",
     "test|123",
     "456",
+  ]);
+});
+
+test("TEST escaped separators", () => {
+  expect(splitUnescaped("a\\,b,c", ",")).toEqual(["a\\,b", "c"]);
+  expect(splitUnescaped("a\\\\,b", ",")).toEqual(["a\\\\", "b"]);
+  expect(unescapeParameter("a\\\\,b")).toEqual("a\\,b");
+  expect(unescapeParameter("a\\,b\\|c\\$d")).toEqual("a,b|c$d");
+  expect(unescapeParameter("a\\xb")).toEqual("a\\xb");
+});
+
+test("TEST query comma escaping", () => {
+  expect(parseFHIRSearch("Patient?name=Smith\\,Jones")[0].value).toEqual([
+    "Smith,Jones",
+  ]);
+  expect(parseFHIRSearch("Patient?name=Smith,Jones")[0].value).toEqual([
+    "Smith",
+    "Jones",
+  ]);
+  expect(parseFHIRSearch("Patient?identifier=a\\|b|1,c")[0].value).toEqual([
+    "a\\|b|1",
+    "c",
   ]);
 });

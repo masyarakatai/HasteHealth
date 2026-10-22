@@ -44,12 +44,12 @@ fn token_predicate(
     code_column: &str,
     params: Vec<SqlParam>,
 ) -> (String, Vec<SqlParam>) {
-    let (params, system) = match token.system {
+    let (params, system) = match &token.system {
         TokenSystem::Any => (params, None),
         TokenSystem::Absent => (params, Some(format!("{system_column} IS NULL"))),
         TokenSystem::Is(system) => equals(params, system_column, Some(system)),
     };
-    let (params, code) = equals(params, code_column, token.code);
+    let (params, code) = equals(params, code_column, token.code.as_deref());
 
     (all_of([system, code]), params)
 }

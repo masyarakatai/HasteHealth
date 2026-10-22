@@ -5,28 +5,39 @@ type SPECIAL_CHARACTER = "\\" | "|" | "$" | ",";
 const SPECIAL_CHARACTERS: SPECIAL_CHARACTER[] = ["\\", "|", "$", ","];
 
 /**
+ * Splits on each separator not escaped by a backslash, leaving the pieces' escapes in place.
+ * @param parameter Parameter to be split
+ * @param separator One of special characters that get escaped on parameter.
+ */
+export function splitUnescaped(
+  parameter: string,
+  separator: SPECIAL_CHARACTER,
+): string[] {
+  const pieces: string[] = [];
+  let start = 0;
+  for (let i = 0; i < parameter.length; i++) {
+    if (parameter[i] === "\\") i++;
+    else if (parameter[i] === separator) {
+      pieces.push(parameter.substring(start, i));
+      start = i + 1;
+    }
+  }
+  pieces.push(parameter.substring(start));
+  return pieces;
+}
+
+/**
  * Returns string with split pieces and unescapes special characters from the split piece.
  * @param parameter Parameter to be split
  * @param specialCharacter One of special characters that get escaped on parameter.
  */
 export function splitParameter(
   parameter: string,
-  specialCharacter: SPECIAL_CHARACTER
+  specialCharacter: SPECIAL_CHARACTER,
 ): string[] {
-  const specialCharEg = new RegExp(`\\${specialCharacter}`, "g");
-  let prevIndex = -1;
-  const pieces = [];
-  let match;
-
-  while ((match = specialCharEg.exec(parameter))) {
-    if (match.index === 0 || parameter[match.index - 1] !== "\\") {
-      pieces.push(parameter.substring(prevIndex + 1, match.index));
-      prevIndex = match.index;
-    }
-  }
-  pieces.push(parameter.substring(prevIndex + 1));
-
-  return pieces.map(unescapeParameter);
+  return splitUnescaped(parameter, specialCharacter).map((piece) =>
+    unescapeParameter(piece),
+  );
 }
 
 /**
@@ -40,7 +51,7 @@ export function escapeParameter(parameter: string): string {
     (parameter: string, character: string): string => {
       return parameter.replaceAll(character, `\\${character}`);
     },
-    parameter
+    parameter,
   );
 }
 
@@ -50,12 +61,13 @@ export function escapeParameter(parameter: string): string {
  * @param parameter Escaped Parameter
  * @returns Unescaped Parameter
  */
-export function unescapeParameter(parameter: string): string {
-  return SPECIAL_CHARACTERS.reduce(
-    (parameter: string, character: string): string => {
-      return parameter.replaceAll(`\\${character}`, character);
-    },
-    parameter
+export function unescapeParameter(
+  parameter: string,
+  characters: readonly SPECIAL_CHARACTER[] = SPECIAL_CHARACTERS,
+): string {
+  // Escapes are read left to right so `\\,` is a backslash then a separator.
+  return parameter.replace(/\\([\s\S])/g, (escape, character) =>
+    (characters as readonly string[]).includes(character) ? character : escape,
   );
 }
 
@@ -66,15 +78,17 @@ export interface ParsedParameter<T> {
   chains?: string[];
 }
 
-export interface SearchParameterResource<Version extends FHIR_VERSION>
-  extends ParsedParameter<string | number> {
+export interface SearchParameterResource<
+  Version extends FHIR_VERSION,
+> extends ParsedParameter<string | number> {
   type: "resource";
   searchParameter: Resource<Version, "SearchParameter">;
   chainedParameters?: Resource<Version, "SearchParameter">[][];
 }
 
-export interface SearchParameterResult
-  extends ParsedParameter<string | number> {
+export interface SearchParameterResult extends ParsedParameter<
+  string | number
+> {
   type: "result";
 }
 
@@ -92,7 +106,7 @@ export type Parameters<Version extends FHIR_VERSION> =
  * @returns Record of parsed parameters with name modifier and value.
  */
 export function parseQuery(
-  queryParams: string | undefined
+  queryParams: string | undefined,
 ): ParsedParameter<string>[] {
   const parameters = !queryParams
     ? []
@@ -102,7 +116,7 @@ export function parseQuery(
         .reduce(
           (
             parameters,
-            [key, value]
+            [key, value],
           ): Record<string, ParsedParameter<string>> => {
             const chains = key.split(".");
 
@@ -111,7 +125,10 @@ export function parseQuery(
             const searchParam: ParsedParameter<string> = {
               name,
               modifier,
-              value: value.split(",").map((v) => decodeURIComponent(v)),
+              // Only `\,` is resolved here; `\|` and `\$` belong to the value's own parsing.
+              value: splitUnescaped(value, ",").map((v) =>
+                unescapeParameter(decodeURIComponent(v), [","]),
+              ),
             };
 
             if (chains.length > 1) searchParam.chains = chains.slice(1);
@@ -119,7 +136,7 @@ export function parseQuery(
 
             return { ...parameters, [searchParam.name]: searchParam };
           },
-          {}
+          {},
         );
 
   return Object.values(parameters);
@@ -131,7 +148,7 @@ export function parseQuery(
  * @returns Record of parsed parameters with name modifier and value.
  */
 export default function parseUrl(
-  url: string
+  url: string,
 ): ParsedParameter<string | number>[] {
   const chunks = url.split("?");
   if (chunks.length > 2)

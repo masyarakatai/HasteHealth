@@ -377,8 +377,8 @@ proptest! {
         let amount = value.amount.as_ref().expect("an amount");
         prop_assert_eq!(amount.prefix, prefix);
         prop_assert_eq!(amount.value, decimal.value());
-        prop_assert_eq!(value.system, (!system.is_empty()).then_some(system.as_str()));
-        prop_assert_eq!(value.code, (!unit.is_empty()).then_some(unit.as_str()));
+        prop_assert_eq!(value.system.as_deref(), (!system.is_empty()).then_some(system.as_str()));
+        prop_assert_eq!(value.code.as_deref(), (!unit.is_empty()).then_some(unit.as_str()));
 
         let bare = decimal.render();
         let value = failed(&format!("{bare:?} did not parse"), QuantityValue::parse(&bare))?;
@@ -391,7 +391,7 @@ proptest! {
     fn token_value_keeps_system_and_code(system in segment(), code in segment()) {
         let value = failed(&format!("{code:?} did not parse"), TokenValue::parse(&code))?;
         prop_assert!(matches!(value.system, TokenSystem::Any));
-        prop_assert_eq!(value.code, Some(code.as_str()));
+        prop_assert_eq!(value.code.as_deref(), Some(code.as_str()));
 
         let text = format!("{system}|{code}");
         let value = failed(&format!("{text:?} did not parse"), TokenValue::parse(&text))?;
@@ -402,11 +402,11 @@ proptest! {
             }
             (true, false) => {
                 prop_assert!(matches!(value.system, TokenSystem::Absent));
-                prop_assert_eq!(value.code, Some(code.as_str()));
+                prop_assert_eq!(value.code.as_deref(), Some(code.as_str()));
             }
             (false, _) => {
-                prop_assert!(matches!(value.system, TokenSystem::Is(s) if s == system));
-                prop_assert_eq!(value.code, (!code.is_empty()).then_some(code.as_str()));
+                prop_assert!(matches!(value.system, TokenSystem::Is(ref s) if *s == system));
+                prop_assert_eq!(value.code.as_deref(), (!code.is_empty()).then_some(code.as_str()));
             }
         }
     }

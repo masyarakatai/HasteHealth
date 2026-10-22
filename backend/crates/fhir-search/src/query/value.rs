@@ -6,10 +6,13 @@
 //! is parsed as the precision range it implies and `ap` as the widened range
 //! it overlaps, so a backend only writes the comparison in its own language.
 //!
-//! Text is borrowed from the parameter and copied once, by the backend, into
-//! its bind list or query.
+//! Text is borrowed from the parameter, and copied once, by the backend, into
+//! its bind list or query. Only text with an escape (`\,`) is copied sooner,
+//! to resolve it.
 
-use haste_fhir_client::url::{Parameter, Prefix, parse_prefix};
+use std::borrow::Cow;
+
+use haste_fhir_client::url::{Parameter, Prefix, parse_prefix, split_unescaped, unescape};
 use haste_fhir_model::r4::{
     datetime::parse_datetime,
     generated::{
@@ -45,13 +48,13 @@ pub enum Values<'a> {
 #[derive(Debug)]
 pub enum StringValues<'a> {
     /// No modifier: a prefix, ignoring case.
-    Prefix(&'a [String]),
+    Prefix(Cow<'a, [String]>),
     /// `:exact`: the whole value, case and accents included.
-    Exact(&'a [String]),
+    Exact(Cow<'a, [String]>),
     /// `:contains`: anywhere in the value, ignoring case.
-    Contains(&'a [String]),
+    Contains(Cow<'a, [String]>),
     /// `:text`: advanced text handling.
-    Text(&'a [String]),
+    Text(Cow<'a, [String]>),
 }
 
 /// A token parameter's values, by modifier.
@@ -71,11 +74,11 @@ pub enum TokenValues<'a> {
     Below(Vec<TokenValue<'a>>),
     /// `:text`: free text matched against a coding's display or a concept's
     /// text.
-    Text(&'a [String]),
+    Text(Cow<'a, [String]>),
     /// `:in`: tokens in any of the value sets, by canonical URI.
-    In(&'a [String]),
+    In(Cow<'a, [String]>),
     /// `:not-in`: tokens in none of the value sets, by canonical URI.
-    NotIn(&'a [String]),
+    NotIn(Cow<'a, [String]>),
     /// `:of-type`: `system|code|value`, the type and value of an identifier.
     OfType(Vec<IdentifierTypeValue<'a>>),
 }
@@ -88,11 +91,11 @@ pub enum TokenValues<'a> {
 )]
 pub enum UriValues<'a> {
     /// No modifier: the URI itself.
-    Uris(&'a [String]),
+    Uris(Cow<'a, [String]>),
     /// `:above`: URIs above the searched one in a hierarchy.
-    Above(&'a [String]),
+    Above(Cow<'a, [String]>),
     /// `:below`: URIs below the searched one in a hierarchy.
-    Below(&'a [String]),
+    Below(Cow<'a, [String]>),
 }
 
 /// A reference parameter's values, by modifier.
@@ -114,30 +117,30 @@ pub enum ReferenceValues<'a> {
 }
 
 /// `code`, `system|code`, `|code`, `system|` or `|`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenValue<'a> {
     pub system: TokenSystem<'a>,
     /// `None` for an empty code (`system|`, `|`): any code.
-    pub code: Option<&'a str>,
+    pub code: Option<Cow<'a, str>>,
 }
 
 /// What a token value says of the system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenSystem<'a> {
     /// Nothing (`code`, `|`): any system.
     Any,
     /// `|code`: there is none.
     Absent,
     /// `system|code` or `system|`.
-    Is(&'a str),
+    Is(Cow<'a, str>),
 }
 
 /// `system|code|value`: an identifier's type and value, for `:of-type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentifierTypeValue<'a> {
-    pub system: &'a str,
-    pub code: &'a str,
-    pub value: &'a str,
+    pub system: Cow<'a, str>,
+    pub code: Cow<'a, str>,
+    pub value: Cow<'a, str>,
 }
 
 /// `id` or `Type/id`.
@@ -169,8 +172,8 @@ pub struct NumberValue {
 #[derive(Debug)]
 pub struct QuantityValue<'a> {
     pub amount: Option<NumberValue>,
-    pub system: Option<&'a str>,
-    pub code: Option<&'a str>,
+    pub system: Option<Cow<'a, str>>,
+    pub code: Option<Cow<'a, str>>,
 }
 
 /// The parameter types every backend indexes: all but composite and special.
@@ -264,6 +267,20 @@ fn each<'a, T>(
     values.iter().map(|value| parse(value)).collect()
 }
 
+/// `values` with their escapes resolved; borrowed when they have none.
+fn resolved(values: &[String]) -> Cow<'_, [String]> {
+    if values.iter().any(|value| value.contains('\\')) {
+        Cow::Owned(
+            values
+                .iter()
+                .map(|value| unescape(value).into_owned())
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(values)
+    }
+}
+
 fn invalid_modifier(modifier: &str) -> QueryBuildError {
     QueryBuildError::InvalidModifier(modifier.to_string())
 }
@@ -271,10 +288,10 @@ fn invalid_modifier(modifier: &str) -> QueryBuildError {
 impl<'a> StringValues<'a> {
     fn parse(modifier: Option<&str>, values: &'a [String]) -> Result<Self, QueryBuildError> {
         Ok(match modifier {
-            None => StringValues::Prefix(values),
-            Some("exact") => StringValues::Exact(values),
-            Some("contains") => StringValues::Contains(values),
-            Some("text") => StringValues::Text(values),
+            None => StringValues::Prefix(resolved(values)),
+            Some("exact") => StringValues::Exact(resolved(values)),
+            Some("contains") => StringValues::Contains(resolved(values)),
+            Some("text") => StringValues::Text(resolved(values)),
             Some(other) => return Err(invalid_modifier(other)),
         })
     }
@@ -292,7 +309,7 @@ impl<'a> StringValues<'a> {
 
     /// The strings, whichever modifier qualifies them.
     #[must_use]
-    pub fn values(&self) -> &'a [String] {
+    pub fn values(&self) -> &[String] {
         match self {
             StringValues::Prefix(values)
             | StringValues::Exact(values)
@@ -310,9 +327,9 @@ impl<'a> TokenValues<'a> {
             Some("not") => TokenValues::Not(codes()?),
             Some("above") => TokenValues::Above(codes()?),
             Some("below") => TokenValues::Below(codes()?),
-            Some("text") => TokenValues::Text(values),
-            Some("in") => TokenValues::In(values),
-            Some("not-in") => TokenValues::NotIn(values),
+            Some("text") => TokenValues::Text(resolved(values)),
+            Some("in") => TokenValues::In(resolved(values)),
+            Some("not-in") => TokenValues::NotIn(resolved(values)),
             Some("of-type") => TokenValues::OfType(each(values, IdentifierTypeValue::parse)?),
             Some(other) => return Err(invalid_modifier(other)),
         })
@@ -337,9 +354,9 @@ impl<'a> TokenValues<'a> {
 impl<'a> UriValues<'a> {
     fn parse(modifier: Option<&str>, values: &'a [String]) -> Result<Self, QueryBuildError> {
         Ok(match modifier {
-            None => UriValues::Uris(values),
-            Some("above") => UriValues::Above(values),
-            Some("below") => UriValues::Below(values),
+            None => UriValues::Uris(resolved(values)),
+            Some("above") => UriValues::Above(resolved(values)),
+            Some("below") => UriValues::Below(resolved(values)),
             Some(other) => return Err(invalid_modifier(other)),
         })
     }
@@ -391,25 +408,25 @@ impl<'a> TokenValue<'a> {
     /// Returns an error for a value with three or more segments, which names
     /// no token.
     pub fn parse(value: &'a str) -> Result<Self, QueryBuildError> {
-        Ok(match value.split_once('|') {
-            None => TokenValue {
+        let mut segments = split_unescaped(value, '|');
+        let invalid = || QueryBuildError::InvalidParameterValue(value.to_string());
+        Ok(match (segments.next(), segments.next(), segments.next()) {
+            (Some(code), None, _) => TokenValue {
                 system: TokenSystem::Any,
-                code: Some(value),
+                code: Some(unescape(code)),
             },
-            Some((_, code)) if code.contains('|') => {
-                return Err(QueryBuildError::InvalidParameterValue(value.to_string()));
-            }
-            Some(("", "")) => TokenValue {
+            (Some(_), Some(_), Some(_)) | (None, ..) => return Err(invalid()),
+            (Some(""), Some(""), None) => TokenValue {
                 system: TokenSystem::Any,
                 code: None,
             },
-            Some(("", code)) => TokenValue {
+            (Some(""), Some(code), None) => TokenValue {
                 system: TokenSystem::Absent,
-                code: Some(code),
+                code: Some(unescape(code)),
             },
-            Some((system, code)) => TokenValue {
-                system: TokenSystem::Is(system),
-                code: (!code.is_empty()).then_some(code),
+            (Some(system), Some(code), None) => TokenValue {
+                system: TokenSystem::Is(unescape(system)),
+                code: (!code.is_empty()).then(|| unescape(code)),
             },
         })
     }
@@ -420,7 +437,7 @@ impl<'a> IdentifierTypeValue<'a> {
     ///
     /// Returns an error unless all three of `system|code|value` are present.
     pub fn parse(value: &'a str) -> Result<Self, QueryBuildError> {
-        let mut segments = value.split('|');
+        let mut segments = split_unescaped(value, '|');
         match (
             segments.next(),
             segments.next(),
@@ -431,9 +448,9 @@ impl<'a> IdentifierTypeValue<'a> {
                 if !system.is_empty() && !code.is_empty() && !identifier.is_empty() =>
             {
                 Ok(IdentifierTypeValue {
-                    system,
-                    code,
-                    value: identifier,
+                    system: unescape(system),
+                    code: unescape(code),
+                    value: unescape(identifier),
                 })
             }
             _ => Err(QueryBuildError::InvalidParameterValue(value.to_string())),
@@ -523,7 +540,7 @@ impl<'a> QuantityValue<'a> {
     /// Returns an error for a value with other than one or three segments, or
     /// an amount that doesn't parse.
     pub fn parse(value: &'a str) -> Result<Self, QueryBuildError> {
-        let mut segments = value.split('|');
+        let mut segments = split_unescaped(value, '|');
         let (amount, system, code) = match (
             segments.next(),
             segments.next(),
@@ -540,7 +557,7 @@ impl<'a> QuantityValue<'a> {
             }
             _ => return Err(QueryBuildError::InvalidParameterValue(value.to_string())),
         };
-        let segment = |segment: &'a str| (!segment.is_empty()).then_some(segment);
+        let segment = |segment: &'a str| (!segment.is_empty()).then(|| unescape(segment));
         Ok(QuantityValue {
             amount: (!amount.is_empty())
                 .then(|| NumberValue::parse(amount))
@@ -567,6 +584,45 @@ mod tests {
             chains: Vec::new(),
         }));
         Values::parse(parameter, type_)
+    }
+
+    #[test]
+    fn escaped_separators_are_literal_in_tokens() {
+        let token = TokenValue::parse(r"http://a\|b|123").unwrap();
+        assert_eq!(token.system, TokenSystem::Is("http://a|b".into()));
+        assert_eq!(token.code.as_deref(), Some("123"));
+
+        let token = TokenValue::parse(r"x\\|y\|z").unwrap();
+        assert_eq!(token.system, TokenSystem::Is(r"x\".into()));
+        assert_eq!(token.code.as_deref(), Some("y|z"));
+
+        // An escaped pipe is not a separator.
+        let token = TokenValue::parse(r"a\|b").unwrap();
+        assert_eq!(token.system, TokenSystem::Any);
+        assert_eq!(token.code.as_deref(), Some("a|b"));
+
+        assert!(TokenValue::parse("a|b|c").is_err());
+    }
+
+    #[test]
+    fn escaped_separators_are_literal_in_quantities() {
+        let quantity = QuantityValue::parse(r"5|http://a\|b|m\|s").unwrap();
+        assert_eq!(quantity.system.as_deref(), Some("http://a|b"));
+        assert_eq!(quantity.code.as_deref(), Some("m|s"));
+    }
+
+    #[test]
+    fn strings_resolve_their_escapes() {
+        let values = vec![r"a\|b".to_string(), "plain".to_string()];
+        let StringValues::Exact(resolved) = StringValues::parse(Some("exact"), &values).unwrap()
+        else {
+            panic!("expected :exact")
+        };
+        assert_eq!(&*resolved, ["a|b", "plain"]);
+        assert!(matches!(
+            StringValues::parse(None, &values[1..]).unwrap(),
+            StringValues::Prefix(Cow::Borrowed(_))
+        ));
     }
 
     #[test]
