@@ -22,7 +22,7 @@
 //! `:iterate` recursion. Both truncate rather than fail, because a chart view
 //! that renders without three of four references is more useful than an error.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use haste_fhir_client::url::{Parameter, ParsedParameter, ParsedParameters};
@@ -50,6 +50,9 @@ const MAX_ITERATE_DEPTH: usize = 2;
 /// and it holds no per-request state.
 static FP_ENGINE: LazyLock<FPEngine> = LazyLock::new(FPEngine::new);
 
+/// `*` in an `_include` value: every type, or every reference parameter.
+const WILDCARD: &str = "*";
+
 /// One parsed `_include` (or `_revinclude`) value.
 ///
 /// `_include=Observation:subject:Patient` is
@@ -57,10 +60,9 @@ static FP_ENGINE: LazyLock<FPEngine> = LazyLock::new(FPEngine::new);
 /// `target_type = Some(Patient)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncludeDirective {
-    /// The type whose parameter is followed. `*` is not accepted; see
-    /// [`parse_include_value`].
+    /// The type whose parameter is followed; [`WILDCARD`] for any matched type.
     pub source_type: String,
-    /// The reference search parameter to follow.
+    /// The reference search parameter to follow; [`WILDCARD`] for all of them.
     pub parameter: String,
     /// Restricts which target type is included, for a parameter that can point
     /// at several.
@@ -103,16 +105,20 @@ fn parsed_values(parameter: &Parameter) -> Vec<IncludeDirective> {
         .collect()
 }
 
-/// `Type:param`, `Type:param:TargetType`, or `*`.
+/// `Type:param`, `Type:param:TargetType`, `Type:*` or `*`.
 ///
-/// `*` is rejected: including every reference of every match is the one form of
-/// this parameter whose cost is not bounded by anything the client stated, and
-/// silently ignoring it would hide that. A client that wants everything names
-/// the parameters.
+/// Wildcards fan out to every reference parameter of the matched types; the
+/// [`MAX_INCLUDED`] and [`MAX_ITERATE_DEPTH`] limits bound the cost.
 fn parse_include_value(value: &str, iterate: bool) -> Option<IncludeDirective> {
     let parts: Vec<&str> = value.split(':').collect();
 
     match parts[..] {
+        [WILDCARD] => Some(IncludeDirective {
+            source_type: WILDCARD.to_string(),
+            parameter: WILDCARD.to_string(),
+            target_type: None,
+            iterate,
+        }),
         [source_type, parameter] if !source_type.is_empty() && !parameter.is_empty() => {
             Some(IncludeDirective {
                 source_type: source_type.to_string(),
@@ -157,58 +163,110 @@ async fn collect_targets(
     let mut targets = Vec::new();
     let mut seen = HashSet::new();
 
-    // One evaluation per (directive, resource of that type).
+    // One evaluation per (expression, resource of that type).
     for directive in directives {
-        let Some(expression) = reference_expression(tenant, project, directive).await? else {
-            continue;
-        };
+        // Expressions per source type, resolved once per directive.
+        let mut expressions: HashMap<ResourceType, Vec<String>> = HashMap::new();
 
-        for resource in resources
-            .iter()
-            .filter(|r| r.resource_type().as_ref() == directive.source_type)
-        {
-            // A parameter whose expression does not apply to this resource is
-            // not a failure of the search: the other includes still stand.
-            let evaluated = match FP_ENGINE.evaluate(&expression, vec![*resource]).await {
-                Ok(evaluated) => evaluated,
-                Err(e) => {
-                    tracing::warn!(
-                        "_include: failed to evaluate '{expression}' for {}:{}: {e}",
-                        directive.source_type,
-                        directive.parameter,
-                    );
-                    continue;
-                }
-            };
+        for resource in resources {
+            let resource_type = resource.resource_type();
+            if directive.source_type != WILDCARD && resource_type.as_ref() != directive.source_type
+            {
+                continue;
+            }
 
-            for value in evaluated.iter() {
-                for reference in indexing_conversion::index_reference_values(value) {
-                    let (Some(resource_type), Some(id)) =
-                        (reference.resource_type(), reference.id())
-                    else {
-                        // A canonical or absolute URL; not a row in this project.
-                        continue;
-                    };
+            if !expressions.contains_key(&resource_type) {
+                let resolved =
+                    directive_expressions(tenant, project, directive, &resource_type).await?;
+                expressions.insert(resource_type.clone(), resolved);
+            }
 
-                    if let Some(wanted) = directive.target_type.as_deref() {
-                        if wanted != resource_type {
-                            continue;
-                        }
-                    }
-
-                    let target = IncludeTarget {
-                        resource_type: resource_type.to_string(),
-                        id: id.to_string(),
-                    };
-                    if seen.insert(target.clone()) {
-                        targets.push(target);
-                    }
-                }
+            for expression in &expressions[&resource_type] {
+                collect_from(resource, expression, directive, &mut targets, &mut seen).await;
             }
         }
     }
 
     Ok(targets)
+}
+
+/// Evaluates `expression` on `resource` and pushes each new reference that
+/// passes `directive`'s target type.
+async fn collect_from(
+    resource: &Resource,
+    expression: &str,
+    directive: &IncludeDirective,
+    targets: &mut Vec<IncludeTarget>,
+    seen: &mut HashSet<IncludeTarget>,
+) {
+    // A parameter whose expression does not apply to this resource is
+    // not a failure of the search: the other includes still stand.
+    let evaluated = match FP_ENGINE.evaluate(expression, vec![resource]).await {
+        Ok(evaluated) => evaluated,
+        Err(e) => {
+            tracing::warn!(
+                "_include: failed to evaluate '{expression}' for {}:{}: {e}",
+                directive.source_type,
+                directive.parameter,
+            );
+            return;
+        }
+    };
+
+    for value in &evaluated {
+        for reference in indexing_conversion::index_reference_values(value) {
+            let (Some(resource_type), Some(id)) = (reference.resource_type(), reference.id())
+            else {
+                // A canonical or absolute URL; not a row in this project.
+                continue;
+            };
+
+            if directive
+                .target_type
+                .as_deref()
+                .is_some_and(|wanted| wanted != resource_type)
+            {
+                continue;
+            }
+
+            let target = IncludeTarget {
+                resource_type: resource_type.to_string(),
+                id: id.to_string(),
+            };
+            if seen.insert(target.clone()) {
+                targets.push(target);
+            }
+        }
+    }
+}
+
+/// The expressions `directive` follows on `resource_type`: one for a named
+/// parameter, every reference parameter's for a wildcard.
+async fn directive_expressions(
+    tenant: &TenantId,
+    project: &ProjectId,
+    directive: &IncludeDirective,
+    resource_type: &ResourceType,
+) -> Result<Vec<String>, OperationOutcomeError> {
+    if directive.parameter != WILDCARD {
+        return Ok(reference_expression(tenant, project, directive)
+            .await?
+            .into_iter()
+            .collect());
+    }
+
+    let mut expressions: Vec<String> = R4_SEARCH_PARAMETERS_INDEX
+        .by_resource_type(tenant, project, resource_type)
+        .await?
+        .into_iter()
+        .filter(|p| p.search_parameter.type_.as_str() == Some("reference"))
+        .filter_map(|p| p.search_parameter.expression.as_ref()?.value.clone())
+        .collect();
+    // Parameters such as `patient` and `subject` share an expression.
+    expressions.sort_unstable();
+    expressions.dedup();
+
+    Ok(expressions)
 }
 
 /// The FHIRPath expression of `directive`'s parameter, or `None` when it names
@@ -391,4 +449,23 @@ fn resource_target(resource: &Resource) -> Option<IncludeTarget> {
         resource_type: resource.resource_type().as_ref().to_string(),
         id: resource.id().clone()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_wildcards() {
+        let all = parse_include_value("*", true).unwrap();
+        assert_eq!(
+            (all.source_type.as_str(), all.parameter.as_str()),
+            ("*", "*")
+        );
+        assert!(all.iterate);
+
+        let typed = parse_include_value("Observation:*", false).unwrap();
+        assert_eq!(typed.source_type, "Observation");
+        assert_eq!(typed.parameter, "*");
+    }
 }
