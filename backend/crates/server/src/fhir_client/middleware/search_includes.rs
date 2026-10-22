@@ -392,10 +392,13 @@ pub async fn resolve_includes<Repo: FHIRRepository>(
 
     let mut included: Vec<Resource> = Vec::new();
 
-    // First hop: the matches.
+    // First hop: the matches. `:iterate` also applies to them, not only to
+    // what has been included.
     let mut frontier = {
         let sources: Vec<&Resource> = matches.iter().collect();
-        let targets = collect_targets(tenant, project, &sources, &direct).await?;
+        let first_hop: Vec<IncludeDirective> =
+            direct.iter().chain(iterate.iter()).cloned().collect();
+        let targets = collect_targets(tenant, project, &sources, &first_hop).await?;
         take_new(targets, &mut emitted, included.len())
     };
     included.extend(read_targets(repo, tenant, project, &frontier).await);

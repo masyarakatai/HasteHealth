@@ -552,9 +552,9 @@
                 },
                 {
                     "assert": {
-                        "description": "Included resources are deduplicated and not iterated",
-                        "expression": "Bundle.entry.where(search.mode = 'include').count()",
-                        "value": "2",
+                        "description": "The shared Patient is included once",
+                        "expression": "Bundle.entry.where(search.mode = 'include').resource.ofType(Patient).count()",
+                        "value": "1",
                         "warningOnly": false,
                         "operator": "equals"
                     }
@@ -594,9 +594,9 @@
                 },
                 {
                     "assert": {
-                        "description": "Each included resource appears once",
-                        "expression": "Bundle.entry.where(search.mode = 'include').count()",
-                        "value": "3",
+                        "description": "The shared Patient is included once",
+                        "expression": "Bundle.entry.where(search.mode = 'include').resource.ofType(Patient).count()",
+                        "value": "1",
                         "warningOnly": false,
                         "operator": "equals"
                     }
